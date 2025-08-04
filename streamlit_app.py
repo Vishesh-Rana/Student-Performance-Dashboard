@@ -5,8 +5,63 @@ import plotly.figure_factory as ff
 import plotly.graph_objects as go
 import numpy as np
 import base64
+import os
+import io
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
+import json
 
-st.set_page_config(layout="wide")
+st.set_page_config(layout="wide", page_title="Student Performance Analysis Dashboard")
+
+# ---- Google Drive Setup ----
+@st.cache_resource
+def initialize_drive_service():
+    """Initialize Google Drive service using service account credentials"""
+    try:
+        # Get credentials from Streamlit secrets
+        credentials_info = st.secrets["google_service_account"]
+        credentials = Credentials.from_service_account_info(
+            credentials_info,
+            scopes=['https://www.googleapis.com/auth/drive.readonly']
+        )
+        service = build('drive', 'v3', credentials=credentials)
+        return service
+    except Exception as e:
+        st.error(f"Failed to initialize Google Drive service: {str(e)}")
+        return None
+
+@st.cache_data(ttl=3600)  # Cache for 1 hour
+def download_file_from_drive(_service, file_id, file_name):
+    """Download file from Google Drive and return as bytes"""
+    try:
+        request = _service.files().get_media(fileId=file_id)
+        file_io = io.BytesIO()
+        downloader = MediaIoBaseDownload(file_io, request)
+        done = False
+        while done is False:
+            status, done = downloader.next_chunk()
+        file_io.seek(0)
+        return file_io.getvalue()
+    except Exception as e:
+        st.error(f"Error downloading {file_name}: {str(e)}")
+        return None
+
+@st.cache_data(ttl=3600)  # Cache for 1 hour
+def load_excel_from_drive(_service, file_id, file_name):
+    """Load Excel file from Google Drive into pandas DataFrame"""
+    file_content = download_file_from_drive(_service, file_id, file_name)
+    if file_content:
+        return pd.read_excel(io.BytesIO(file_content), sheet_name=None, engine='openpyxl')
+    return None
+
+@st.cache_data(ttl=3600)  # Cache for 1 hour
+def load_image_from_drive(_service, file_id, file_name):
+    """Load image file from Google Drive and convert to base64"""
+    file_content = download_file_from_drive(_service, file_id, file_name)
+    if file_content:
+        return base64.b64encode(file_content).decode()
+    return None
 
 # ---- Custom CSS ----
 st.markdown("""
@@ -16,25 +71,26 @@ st.markdown("""
         color: black;
         text-align: center;
         font-weight: bold;
+        font-size: 0.9em;
         border-radius: 5px 5px 0 0;
-        padding: 6px 0 6px 0;
+        padding: 4px 0 4px 0;
         margin-bottom: 0px;
     }
     .metric-card {
         background: white;
         border-radius: 0 0 5px 5px;
         box-shadow: 0 2px 4px rgba(0,0,0,0.04);
-        padding: 8px 0 4px 0;
-        margin-bottom: 10px;
+        padding: 6px 0 3px 0;
+        margin-bottom: 8px;
         text-align: center;
     }
     .metric-value {
-        font-size: 2em;
+        font-size: 1.5em;
         font-weight: 600;
         color: #222;
     }
     .metric-label {
-        font-size: 1em;
+        font-size: 0.8em;
         color: #666;
     }
     .block-container {
@@ -52,52 +108,104 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# ---- Load Data ----
-files_and_teams = [
-    ("Team Kathy Results.xlsx", "Team Kathy"),
-    ("Team Kelly A. Results.xlsx", "Team Kelly"),
-    ("Team Lissette A.Results.xlsx", "Team Lissette"),
-]
-dfs = []
-for file, team in files_and_teams:
+# ---- Load Data from Google Drive ----
+def load_data():
+    """Load all data from Google Drive"""
+    service = initialize_drive_service()
+    if not service:
+        st.error("Cannot connect to Google Drive. Please check your service account configuration.")
+        st.stop()
+    
     try:
-        all_sheets = pd.read_excel(file, sheet_name=None, engine='openpyxl')
+        # Get file IDs from secrets
+        file_ids = st.secrets["google_drive_files"]
         
-        for sheet_name, df in all_sheets.items():
-            df["Team Name"] = team
-            
-            # Replace NA, N/A, and similar values with "Not Appeared" across all columns
-            df = df.replace({
-                'NA': 'Not Appeared',
-                'N/A': 'Not Appeared',
-                'N.A': 'Not Appeared',
-                'n/a': 'Not Appeared',
-                'na': 'Not Appeared',
-                'n.a': 'Not Appeared',
-                'N.A.': 'Not Appeared',
-                'N/A/': 'Not Appeared'
-            })
-            dfs.append(df)
+        # Load team result files
+        files_and_teams = [
+            (file_ids["team_kathy"], "Team Kathy"),
+            (file_ids["team_kelly"], "Team Kelly"),
+            (file_ids["team_lissette"], "Team Lissette"),
+        ]
+        
+        dfs = []
+        for file_id, team in files_and_teams:
+            try:
+                all_sheets = load_excel_from_drive(service, file_id, f"{team} Results")
+                if all_sheets:
+                    for sheet_name, df in all_sheets.items():
+                        df["Team Name"] = team
+                        
+                        # Replace NA, N/A, and similar values with "Not Appeared" across all columns
+                        df = df.replace({
+                            'NA': 'Not Appeared',
+                            'N/A': 'Not Appeared',
+                            'N.A': 'Not Appeared',
+                            'n/a': 'Not Appeared',
+                            'na': 'Not Appeared',
+                            'n.a': 'Not Appeared',
+                            'N.A.': 'Not Appeared',
+                            'N/A/': 'Not Appeared'
+                        })
+                        dfs.append(df)
+                else:
+                    st.warning(f"Could not load data for {team}")
+            except Exception as e:
+                st.error(f"Error loading {team} data: {str(e)}")
+        
+        if not dfs:
+            st.error("No team data could be loaded.")
+            st.stop()
+        
+        df_main = pd.concat(dfs, ignore_index=True)
+        
+        # Load High School Data Sheet (only if file ID is provided and not placeholder)
+        high_school_file_id = file_ids.get("high_school_data", "")
+        if high_school_file_id and high_school_file_id != "REPLACE_WITH_ACTUAL_FILE_ID":
+            high_school_data = load_excel_from_drive(service, high_school_file_id, "High School Data")
+            if high_school_data:
+                # Get the first sheet if multiple sheets exist
+                high_school_df = list(high_school_data.values())[0]
+                high_school_df = high_school_df.rename(columns={"Name": "Student"})
+                # Also replace NA/N/A values in the high school data sheet
+                high_school_df = high_school_df.replace({
+                    'NA': 'Not Appeared',
+                    'N/A': 'Not Appeared',
+                    'N.A': 'Not Appeared',
+                    'n/a': 'Not Appeared',
+                    'na': 'Not Appeared',
+                    'n.a': 'Not Appeared',
+                    'N.A.': 'Not Appeared',
+                    'N/A/': 'Not Appeared'
+                })
+                df_main = df_main.merge(high_school_df, how="left", on="Student")
+            else:
+                st.warning("Could not load High School Data Sheet")
+        else:
+            st.info("High School Data Sheet not configured - using team data only")
+        
+        return df_main
+        
     except Exception as e:
-        st.error(f"Error loading {file}: {str(e)}")
-        
-df_main = pd.concat(dfs, ignore_index=True)
+        st.error(f"Error loading data: {str(e)}")
+        st.stop()
 
-# ---- Merge High School Data Sheet ----
-high_school_df = pd.read_excel("High School Data Sheet.xlsx", engine='openpyxl')
-high_school_df = high_school_df.rename(columns={"Name": "Student"})
-# Also replace NA/N/A values in the high school data sheet
-high_school_df = high_school_df.replace({
-    'NA': 'Not Appeared',
-    'N/A': 'Not Appeared',
-    'N.A': 'Not Appeared',
-    'n/a': 'Not Appeared',
-    'na': 'Not Appeared',
-    'n.a': 'Not Appeared',
-    'N.A.': 'Not Appeared',
-    'N/A/': 'Not Appeared'
-})
-df_main = df_main.merge(high_school_df, how="left", on="Student")
+# Function to load logo from local file
+def get_logo_base64():
+    """Load logo from local file and convert to base64"""
+    try:
+        logo_path = "SAM Elimu Logo-white_edited.png"
+        with open(logo_path, "rb") as img_file:
+            return base64.b64encode(img_file.read()).decode()
+    except Exception as e:
+        st.warning(f"Could not load logo from local file: {str(e)}")
+        return None
+
+# Load data and logo
+with st.spinner("Loading data from Google Drive..."):
+    df_main = load_data()
+
+# Load logo from local file
+logo_base64 = get_logo_base64()
 
 # ---- Clean up duplicate columns after merge ----
 if "Form_x" in df_main.columns or "Form_y" in df_main.columns:
@@ -120,6 +228,7 @@ subject_columns = [
     "History", "Agriculture", "Business Studies", "French", "Computer studies", "Home Science",
     "Woodwork"
 ]
+
 def all_subjects_empty(row):
     # Check if all subjects are either empty/NaN or "Not Appeared"
     found_data = False
@@ -178,36 +287,25 @@ def grade_to_remark(grade):
         return "Below Expectation"
     else:
         return "Unknown"
+
 if "Mean Grade" in df_main.columns:
     df_main["Remark"] = df_main["Mean Grade"].apply(grade_to_remark)
 
 # ---- Page Title ----
-
-# Function to convert image to base64 for embedding
-def get_base64_of_image(path):
-    try:
-        with open(path, "rb") as img_file:
-            return base64.b64encode(img_file.read()).decode()
-    except:
-        return None
-
-# Get logo as base64
-logo_base64 = get_base64_of_image("SAM Elimu Logo-white_edited.png")
-
 if logo_base64:
     st.markdown(f"""
         <div class="main-header">
-            <div style='background-color: #FFC300; padding: 12px; border-radius: 8px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.1); position: relative; display: flex; align-items: center; justify-content: space-between;'>
-                <h1 style='color: black; margin: 0; font-size: 1.8em; font-weight: bold; flex: 1; text-align: center;'>Student Performance Analysis Dashboard</h1>
-                <img src="data:image/png;base64,{logo_base64}" style="height: 120px; width: auto; margin-left: auto; margin-top: auto; padding-top: 20px; padding-left: 20px;" alt="SAM Elimu Logo">
+            <div style='background-color: #FFC300; padding: 8px; border-radius: 8px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.1); position: relative; display: flex; align-items: center; justify-content: space-between;'>
+                <h1 style='color: black; margin: 0; font-size: 1.6em; font-weight: bold; flex: 1; text-align: center;'>Student Performance Analysis Dashboard</h1>
+                <img src="data:image/png;base64,{logo_base64}" style="height: 80px; width: auto; margin: 10px;" alt="SAM Elimu Logo">
             </div>
         </div>
     """, unsafe_allow_html=True)
 else:
     st.markdown("""
         <div class="main-header">
-            <div style='background-color: #FFC300; padding: 12px; border-radius: 8px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.1); position: relative;'>
-                <h1 style='color: black; margin: 0; font-size: 1.8em; font-weight: bold;'>Student Performance Analysis Dashboard</h1>
+            <div style='background-color: #FFC300; padding: 8px; border-radius: 8px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.1); position: relative;'>
+                <h1 style='color: black; margin: 0; font-size: 1.6em; font-weight: bold;'>Student Performance Analysis Dashboard</h1>
             </div>
         </div>
     """, unsafe_allow_html=True)
@@ -384,7 +482,7 @@ with tab1:
                         """, unsafe_allow_html=True)
 
         # Second row: Humanities and Technical Subjects
-        main_cols_row2 = st.columns(2)
+        main_cols_row2 = st.columns([1, 2])  # Humanities gets 1/3, Technical gets 2/3
 
         with main_cols_row2[0]:
             st.markdown('<div class="metric-header">Average Score in Humanities</div>', unsafe_allow_html=True)
@@ -396,6 +494,7 @@ with tab1:
                     humanities_metrics.append((subject, filtered[subject].mean()))
             
             if humanities_metrics:
+                # Display humanities in a single horizontal line
                 hum_cols = st.columns(len(humanities_metrics))
                 for i, (label, value) in enumerate(humanities_metrics):
                     display_value = f"{value:.0f}" if pd.notnull(value) else "--"
@@ -409,7 +508,7 @@ with tab1:
 
         with main_cols_row2[1]:
             st.markdown('<div class="metric-header">Average Score in Technical Subjects</div>', unsafe_allow_html=True)
-            # Technical Subjects: Computer Studies, Business Studies, Electricity, Woodwork, Home Science, Agriculture
+            # Technical Subjects: Computer Studies, Business Studies, Woodwork, Home Science, Agriculture
             technical_subjects = ["Computer studies", "Business Studies", "Woodwork", "Home Science", "Agriculture"]
             technical_metrics = []
             for subject in technical_subjects:
@@ -417,6 +516,7 @@ with tab1:
                     technical_metrics.append((subject, filtered[subject].mean()))
             
             if technical_metrics:
+                # Display all technical subjects in a single horizontal line
                 tech_cols = st.columns(len(technical_metrics))
                 for i, (label, value) in enumerate(technical_metrics):
                     display_value = f"{value:.0f}" if pd.notnull(value) else "--"
@@ -503,41 +603,6 @@ with tab1:
                 fig4.update_traces(hovertemplate='<b>%{x}</b><br>Overall Score: %{y:.1f}%<extra></extra>')
                 fig4.update_layout(showlegend=False, xaxis_tickangle=-45)
                 chart4.plotly_chart(fig4, use_container_width=True)
-
-        # # ---- Box Plot for Subjects of Concern ----
-        # if existing_subjects:
-        #     subject_avg = filtered[existing_subjects].mean().sort_values()
-        #     concern_subjects = subject_avg[subject_avg < 60]
-        #     if not concern_subjects.empty:
-        #         st.markdown("---")
-        #         st.subheader("📈 Detailed Analysis for Subjects Needing Attention")
-                
-        #         fig_box = px.box(
-        #             filtered.melt(value_vars=concern_subjects.index, var_name="Subject", value_name="Score"),
-        #             x="Subject",
-        #             y="Score",
-        #             title="Score Distribution for Subjects Needing Attention",
-        #             color="Subject",
-        #             color_discrete_sequence=px.colors.qualitative.Set2
-        #         )
-        #         fig_box.update_traces(hovertemplate='<b>%{x}</b><br>Score: %{y}<extra></extra>')
-        #         fig_box.update_layout(showlegend=False)
-        #         st.plotly_chart(fig_box, use_container_width=True)
-
-        #         fig_violin = px.violin(
-        #             filtered.melt(value_vars=concern_subjects.index, var_name="Subject", value_name="Score"),
-        #             x="Subject",
-        #             y="Score",
-        #             box=True,
-        #             points="all",
-        #             title="Score Distribution (Violin Plot) for Subjects Needing Attention",
-        #             color="Subject",
-        #             color_discrete_sequence=px.colors.qualitative.Pastel
-        #         )
-        #         fig_violin.update_traces(hovertemplate='<b>%{x}</b><br>Score: %{y}<extra></extra>')
-        #         fig_violin.update_layout(showlegend=False)
-        #         st.plotly_chart(fig_violin, use_container_width=True)
-
 
 with tab2:
     st.markdown("### 👨‍🎓 Individual Student Analysis")
@@ -865,7 +930,6 @@ with tab2:
     else:
         st.error("Student data not available.")
 
-
 with tab3:
     st.markdown("### 📋 Detailed Student Data")
     
@@ -957,4 +1021,3 @@ with tab3:
             file_name=f"student_data_filtered_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
             mime="text/csv"
         )
-
