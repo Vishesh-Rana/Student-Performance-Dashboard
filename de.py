@@ -63,6 +63,26 @@ def load_image_from_drive(_service, file_id, file_name):
         return base64.b64encode(file_content).decode()
     return None
 
+@st.cache_data(ttl=3600)
+def load_workbook_from_drive(_service, file_id, file_name):
+
+    file_content = download_file_from_drive(
+        _service,
+        file_id,
+        file_name
+    )
+
+    if not file_content:
+        return None
+
+    wb = load_workbook(
+        filename=io.BytesIO(file_content),
+        data_only=True
+    )
+
+
+    return wb
+
 # ---- Custom CSS ----
 st.markdown("""
     <style>
@@ -112,12 +132,6 @@ st.markdown("""
 # ==========================================
 # ---- NEW: Tertiary Parsing Functions -----
 # ==========================================
-def map_school_data(file_path, sheet_name, main_df):
-    school_df = pd.read_excel(file_path, sheet_name=sheet_name)
-    school_df = school_df[['Name', 'School', 'Course']]
-    tertiary_df = main_df.merge(school_df, left_on='Student_Name', right_on='Name', how='left').drop(columns=['Name'])
-    tertiary_df = tertiary_df[['Student_Name', 'School', 'Course', 'Year', 'Semester', 'Code', 'Unit Name', 'Grade', 'Result']]
-    return tertiary_df
 
 def parse_excel_blocks_with_empty_rows(ws):
     rows = list(ws.iter_rows(values_only=True))
@@ -208,14 +222,27 @@ def parse_excel_blocks_with_empty_rows(ws):
 
     return pd.DataFrame(results)
 
-def process_multiple_sheets(file_path):
-    wb = load_workbook(file_path, data_only=True)
+def process_multiple_sheets(_service, file_id, file_name):
+    
+    wb = load_workbook_from_drive(_service, file_id, file_name)
+
+    if wb is None:
+        return pd.DataFrame()
+
+    ws1 = wb['Tertiary Student List']
+    data = list(ws1.values)
+    df_temp = pd.DataFrame(data[1:], columns=data[0])
+    df_temp = df_temp[['Name', 'School', 'Course']]
+    
     remove_vals = ['Tertiary Student List', 'Template']
     sheet_list = [x for x in list(wb.sheetnames) if x not in remove_vals]
-    all_dfs = []
 
+    all_dfs = []
+    
     for sheet in sheet_list:
         ws = wb[sheet]
+
+
         df = parse_excel_blocks_with_empty_rows(ws)
 
         if not df.empty:
@@ -226,7 +253,7 @@ def process_multiple_sheets(file_path):
             df['Grade'] = df['Grade'].fillna('MISSING')  # Mark missing grades explicitly
 
             # Step 1: Create result column
-            df['Result'] = df['Grade'].apply(lambda x: 'FAIL' if x in ['E', 'F', 'FAIL','FAILED']
+            df['Result'] = df['Grade'].apply(lambda x: 'FAIL' if x in ['E', 'F', 'FAIL']
                                              else 'MISSING' if x in ['MISSING']
                                              else 'SPECIAL' if x in ['SPECIAL']
                                                     else 'PASS')
@@ -241,7 +268,11 @@ def process_multiple_sheets(file_path):
     else:
         final_df = pd.DataFrame()
 
-    return final_df
+    tertiary_df = final_df.merge(df_temp, left_on='Student_Name', right_on='Name', how='left').drop(columns=['Name'])
+    tertiary_df = tertiary_df[['Student_Name', 'School', 'Course', 'Year', 'Semester', 'Code', 'Unit Name', 'Grade', 'Result']]
+
+
+    return tertiary_df
 
 
 # ---- Load Data from Google Drive ----
@@ -255,7 +286,7 @@ def load_data():
     try:
         # Get file IDs from secrets
         file_ids = st.secrets["google_drive_files"]
-        print(file_ids)
+
         # Load team result files (From Google Drive)
         files_and_teams = [
             (file_ids["team_kathy"], "Team Kathy"),
@@ -322,25 +353,22 @@ def load_data():
         # ==========================================
         
         # Ensure this matches the name of your raw unparsed file
-        TERTIARY_EXCEL_PATH = "Tertiary_results_latest.xlsx" 
+        tertiary_file_id = file_ids.get("tertiary_data", "")
         
         tertiary_df = None
-        if os.path.exists(TERTIARY_EXCEL_PATH):
+        if tertiary_file_id:
             try:
                 # 1. Parse the multiple sheets to get the main DF
-                main_parsed_df = process_multiple_sheets(file_path=TERTIARY_EXCEL_PATH)
-                
-                # 2. Merge with the Student List sheet to get Course & School data
-                tertiary_df = map_school_data(file_path=TERTIARY_EXCEL_PATH, sheet_name="Tertiary Student List", main_df=main_parsed_df)
+                tertiary_df = process_multiple_sheets(service, tertiary_file_id, "Tertiary Restults")
                 
                 # 3. Rename 'Student_Name' to 'Student' to perfectly match Tab 5 code requirements
                 if "Student_Name" in tertiary_df.columns:
                     tertiary_df = tertiary_df.rename(columns={"Student_Name": "Student"})
 
             except Exception as e:
-                st.error(f"Error parsing the local Tertiary Excel file: {str(e)}")
+                st.error(f"Error parsing theTertiary Excel file: {str(e)}")
         else:
-            st.warning(f"Local Tertiary raw data not found at: `{TERTIARY_EXCEL_PATH}`. Please check the file path.")
+            st.warning(f"Unable to load Tertiary data from drive. Please check the configurations.")
 
         # Return all main dataframes
         return df_main, high_school_unique_students, dropout_df, tertiary_df
