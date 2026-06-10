@@ -232,7 +232,7 @@ def process_multiple_sheets(_service, file_id, file_name):
     ws1 = wb['Tertiary Student List']
     data = list(ws1.values)
     df_temp = pd.DataFrame(data[1:], columns=data[0])
-    df_temp = df_temp[['Name', 'School', 'Course']]
+    df_temp = df_temp[['Name', 'School', 'Course', 'Specialization', 'Student Status']]
     
     remove_vals = ['Tertiary Student List', 'Template']
     sheet_list = [x for x in list(wb.sheetnames) if x not in remove_vals]
@@ -269,7 +269,7 @@ def process_multiple_sheets(_service, file_id, file_name):
         final_df = pd.DataFrame()
 
     tertiary_df = final_df.merge(df_temp, left_on='Student_Name', right_on='Name', how='left').drop(columns=['Name'])
-    tertiary_df = tertiary_df[['Student_Name', 'School', 'Course', 'Year', 'Semester', 'Code', 'Unit Name', 'Grade', 'Result']]
+    tertiary_df = tertiary_df[['Student_Name', 'School', 'Course', 'Specialization', 'Student Status', 'Year', 'Semester', 'Code', 'Unit Name', 'Grade', 'Result']]
 
 
     return tertiary_df
@@ -1047,35 +1047,114 @@ with tab3:
             file_name=f"student_data_filtered_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
             mime="text/csv"
         )
-
 # --- Tab 4 ---
 with tab4:
     st.markdown("### 🚪 Dropouts Tracking")
+
     if dropout_df is not None and not dropout_df.empty:
+
         df = dropout_df.copy()
+
         header_row_idx = None
         for idx, row in df.iterrows():
             if 'Student Name' in row.values and 'Dropout Period' in row.values and 'Reason' in row.values:
                 header_row_idx = idx
                 break
+
         if header_row_idx is not None:
             df.columns = df.iloc[header_row_idx]
-            df = df.iloc[header_row_idx+1:]
+            df = df.iloc[header_row_idx + 1:]
             df = df.reset_index(drop=True)
-        needed_cols = ["Student Name", "Dropout Period", "Reason"]
+
+        needed_cols = ["Student Name", "Dropout Period", "Reason", "Level"]
         df = df[[col for col in needed_cols if col in df.columns]]
+
         df = df[df["Student Name"].astype(str).str.strip() != ""]
         df = df[df["Reason"].astype(str).str.strip() != ""]
+
         if "Dropout Period" in df.columns:
-            df["Dropout Period"] = pd.to_datetime(df["Dropout Period"], errors='coerce').dt.strftime('%b-%y')
+            df["Dropout Period"] = pd.to_datetime(
+                df["Dropout Period"],
+                errors='coerce'
+            ).dt.strftime('%b-%y')
+
+        # ==================================================
+        # ADDED: Level & Student Name Filters
+        # - Level dropdown
+        # - Student Name dropdown
+        # - Student list updates based on selected Level
+        # - Displayed table and CSV respect selected filters
+        # ==================================================
+        st.markdown("""
+            <div style='background-color: #87cefa; padding: 6px; border-radius: 4px; text-align: center; margin-bottom: 15px;'>
+                <span style='color: black; font-weight: bold; font-size: 16px;'>🔍 Filter Dropout Data</span>
+            </div>
+        """, unsafe_allow_html=True)
+        filter_col1, filter_col2 , spacer = st.columns([1, 1,1])
+        #filter_col1, filter_col2 = st.columns(2)
+
+        # Level Filter
+        with filter_col1:
+            if "Level" in df.columns:
+                level_options = ["All"] + sorted(
+                    df["Level"].dropna().astype(str).unique().tolist()
+                )
+
+                selected_level = st.selectbox(
+                    "Level",
+                    options=level_options,
+                    key="dropout_level"
+                )
+            else:
+                selected_level = "All"
+
+        # Apply Level Filter First
+        filtered_df = df.copy()
+
+        if selected_level != "All":
+            filtered_df = filtered_df[
+                filtered_df["Level"].astype(str) == selected_level
+            ]
+
+        # Student Name Filter
+        with filter_col2:
+            if "Student Name" in filtered_df.columns:
+                student_options = ["All"] + sorted(
+                    filtered_df["Student Name"]
+                    .dropna()
+                    .astype(str)
+                    .unique()
+                    .tolist()
+                )
+
+                selected_student = st.selectbox(
+                    "Student Name",
+                    options=student_options,
+                    key="dropout_student"
+                )
+            else:
+                selected_student = "All"
+
+        # Apply Student Filter
+        if selected_student != "All":
+            filtered_df = filtered_df[
+                filtered_df["Student Name"].astype(str) == selected_student
+            ]
+
+        # Use filtered dataframe for display and download
+        df = filtered_df
+
         st.dataframe(df, use_container_width=True)
+
         csv_data = df.to_csv(index=False)
+
         st.download_button(
             label="📥 Download Dropouts Data as CSV",
             data=csv_data,
             file_name=f"dropouts_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
             mime="text/csv"
         )
+
     else:
         st.warning("No dropout data found or the file is empty.")
 
@@ -1107,13 +1186,19 @@ with tab5:
             if exclude != "Year" and st.session_state.get("t_year", "All") != "All":
                 temp = temp[temp["Year"] == st.session_state.t_year]
 
+            if exclude != "Specialization" and st.session_state.get("t_specialization", "All") != "All":
+                temp = temp[temp["Specialization"] == st.session_state.t_specialization]
+
+            if exclude != "Student Status" and st.session_state.get("t_status", "All") != "All":
+                temp = temp[temp["Student Status"] == st.session_state.t_status]
+
             #if exclude != "Semester" and st.session_state.get("t_sem", "All") != "All":
             #    temp = temp[temp["Semester"] == st.session_state.t_sem]
 
             return temp
 
 
-        f_col1, f_col2, f_col3, f_col4 = st.columns(4)
+        f_col1, f_col2, f_col3, f_col4, f_col5, f_col6 = st.columns(6)
 
         with f_col1:
             school_options = ["All"] + sorted(
@@ -1136,6 +1221,16 @@ with tab5:
             )
 
         with f_col3:
+            specialization_options = ["All"] + sorted(
+                filter_df(exclude="Specialization")["Specialization"].dropna().astype(str).unique()
+            )
+            selected_specialization = st.selectbox(
+                "Specialization",
+                specialization_options,
+                key="t_specialization"
+            )
+
+        with f_col4:
             student_options = ["All"] + sorted(
                 filter_df(exclude="Student")["Student"].dropna().astype(str).unique()
             )
@@ -1145,7 +1240,7 @@ with tab5:
                 key="t_student"
             )
 
-        with f_col4:
+        with f_col5:
             year_options = ["All"] + sorted(
                 filter_df(exclude="Year")["Year"].dropna().astype(str).unique()
             )
@@ -1155,15 +1250,15 @@ with tab5:
                 key="t_year"
             )
 
-        # with f_col5:
-            #semester_options = ["All"] + sorted(
-            #    filter_df(exclude="Semester")["Semester"].dropna().astype(str).unique()
-            #)
-            #selected_semester = st.selectbox(
-            #    "Semester",
-            #    semester_options,
-            #    key="t_sem"
-            #)
+        with f_col6:
+            student_status_options = ["All"] + sorted(
+                filter_df(exclude="Student Status")["Student Status"].dropna().astype(str).unique()
+            )
+            selected_status = st.selectbox(
+                "Student Status",
+                student_status_options,
+                key="t_status"
+            )
 
         t_filtered = filter_df()
 
@@ -1184,24 +1279,32 @@ with tab5:
             
         t_filtered['Status_Category'] = t_filtered.apply(categorize_status, axis=1)
 
+        print(len(list(t_filtered['Student'].unique())))
+
         total_units = len(t_filtered)
         passed_count = len(t_filtered[t_filtered['Status_Category'] == 'Passed'])
         failed_count = len(t_filtered[t_filtered['Status_Category'] == 'Failed'])
         pending_count = len(t_filtered[t_filtered['Status_Category'] == 'Pending'])
+        student_count = len(list(t_filtered['Student'].unique()))
         
-        t_col1, t_col2, t_col3, t_col4 = st.columns(4)
+        t_col1, t_col2, t_col3, t_col4, t_col5 = st.columns(5)
+
         with t_col1:
+            st.markdown('<div class="metric-header" style="background-color: #ffa500;">Student Count</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="metric-card"><div class="metric-value" style="color:#856404;">{student_count}</div></div>', unsafe_allow_html=True)
+        with t_col2:
             st.markdown('<div class="metric-header">Total Units Taken</div>', unsafe_allow_html=True)
             st.markdown(f'<div class="metric-card"><div class="metric-value">{total_units}</div></div>', unsafe_allow_html=True)
-        with t_col2:
+        with t_col3:
             st.markdown('<div class="metric-header" style="background-color: #d4edda;">Units Passed</div>', unsafe_allow_html=True)
             st.markdown(f'<div class="metric-card"><div class="metric-value" style="color:#155724;">{passed_count}</div></div>', unsafe_allow_html=True)
-        with t_col3:
+        with t_col4:
             st.markdown('<div class="metric-header" style="background-color: #f8d7da;">Units Failed</div>', unsafe_allow_html=True)
             st.markdown(f'<div class="metric-card"><div class="metric-value" style="color:#721c24;">{failed_count}</div></div>', unsafe_allow_html=True)
-        with t_col4:
+        with t_col5:
             st.markdown('<div class="metric-header" style="background-color: #fff3cd;">Units Missing/Special</div>', unsafe_allow_html=True)
             st.markdown(f'<div class="metric-card"><div class="metric-value" style="color:#856404;">{pending_count}</div></div>', unsafe_allow_html=True)
+        
 
         st.markdown("---")
         
@@ -1242,7 +1345,7 @@ with tab5:
         # ==========================================
         # 4. DATA TABLES SECTION (Separated)
         # ==========================================
-        full_display_cols = [col for col in ['Student', 'School', 'Course', 'Year', 'Semester', 'Code', 'Unit Name', 'Grade', 'Result'] if col in t_filtered.columns]
+        full_display_cols = [col for col in ['Student', 'School', 'Course', 'Specialization', 'Student Status', 'Year', 'Semester', 'Code', 'Unit Name', 'Grade', 'Result'] if col in t_filtered.columns]
         table_config = {
             "School": st.column_config.TextColumn("School", width="medium"), 
             "Course": st.column_config.TextColumn("Course", width="medium"), 
